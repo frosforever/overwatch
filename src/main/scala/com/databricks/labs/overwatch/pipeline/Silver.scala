@@ -301,6 +301,13 @@ class Silver(_workspace: Workspace, _database: Database, _config: Config)
     append(SilverTargets.notebookStatusTarget)
   )
 
+  lazy private[overwatch] val endPointsConfigModule = Module(2020, "Silver_DBSQLEndpoints", this, Array(1004))
+  lazy private val endPointsConfigProcess = ETLDefinition(
+    BronzeTargets.auditLogsTarget.asIncrementalDF(endPointsConfigModule, BronzeTargets.auditLogsTarget.incrementalColumns),
+    Seq(accountLogins()), //add a function here for dbsql-endpoints
+    append(SilverTargets.endPointsConfigTarget)
+  )
+
   private def processSparkEvents(): Unit = {
 
     executorsModule.execute(appendExecutorsProcess)

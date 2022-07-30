@@ -179,6 +179,13 @@ class Bronze(_workspace: Workspace, _database: Database, _config: Config)
     append(BronzeTargets.sparkEventLogsTarget) // Not new data only -- date filters handled in function logic
   )
 
+  lazy private[overwatch] val endpointsSnapshotModule = Module(1015, "Bronze_Endpoints_Spec_Snapshot", this)
+  lazy private val appendEndPointsAPIProcess = ETLDefinition(
+    workspace.getEndpointsDF,
+    Seq(generateEndpointSpecsDF()), //add business logic to this function.
+    append(BronzeTargets.endpointsSnapshotTarget)
+  )
+
   // TODO -- convert and merge this into audit's ETLDefinition
   private def landAzureAuditEvents(): Unit = {
     val isFirstAuditRun = !BronzeTargets.auditLogsTarget.exists(dataValidation = true)
@@ -206,6 +213,7 @@ class Bronze(_workspace: Workspace, _database: Database, _config: Config)
       case OverwatchScope.jobs => jobsSnapshotModule.execute(appendJobsProcess)
       case OverwatchScope.pools => poolsSnapshotModule.execute(appendPoolsProcess)
       case OverwatchScope.sparkEvents => sparkEventLogsModule.execute(appendSparkEventLogsProcess)
+      case OverwatchScope.endpoints => endpointsSnapshotModule.execute(appendEndPointsAPIProcess)
       case _ =>
     }
   }

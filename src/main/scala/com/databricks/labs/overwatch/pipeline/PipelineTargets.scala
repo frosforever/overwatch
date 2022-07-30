@@ -154,6 +154,17 @@ abstract class PipelineTargets(config: Config) {
       config
     )
 
+    lazy private[overwatch] val endpointsSnapshotTarget: PipelineTable = PipelineTable(
+      name = "endpoints_spec_snapshot_bronze",
+      _keys = Array("cluster_id", "Overwatch_RunID"), //need to check
+      config,
+      incrementalColumns = Array("Pipeline_SnapTS"),
+      statsColumns = ("organization_id, cluster_id, driver_node_type_id, instance_pool_id, node_type_id, " +
+        "start_time, terminated_time, Overwatch_RunID").split(", "),   // need to check
+      partitionBy = Seq("organization_id"),
+      masterSchema = Some(Schema.clusterSnapMinimumSchema)
+    )
+
   }
 
   /**
@@ -287,6 +298,14 @@ abstract class PipelineTargets(config: Config) {
     lazy private[overwatch] val notebookStatusTarget: PipelineTable = PipelineTable(
       name = "notebook_silver",
       _keys = Array("notebookId", "requestId", "actionName", "timestamp"),
+      config,
+      incrementalColumns = Array("timestamp"),
+      partitionBy = Seq("organization_id", "__overwatch_ctrl_noise")
+    )
+
+    lazy private[overwatch] val endPointsConfigTarget: PipelineTable = PipelineTable(
+      name = "endpoints_config_silver",
+      _keys = Array("timestamp", "id"),
       config,
       incrementalColumns = Array("timestamp"),
       partitionBy = Seq("organization_id", "__overwatch_ctrl_noise")

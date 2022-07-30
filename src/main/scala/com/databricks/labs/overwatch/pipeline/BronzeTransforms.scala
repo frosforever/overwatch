@@ -927,4 +927,8 @@ trait BronzeTransforms extends SparkSessionWrapper {
 
   }
 
+  protected def generateEndpointSpecsDF()(df: DataFrame): DataFrame = {
+    df
+  }
+
 }

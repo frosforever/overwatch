@@ -159,6 +159,18 @@ class Workspace(config: Config) extends SparkSessionWrapper {
   }
 
   /**
+   *
+   * @return
+   */
+  def getEndpointsDF: DataFrame = {
+    val clustersEndpoint = "sql/warehouses"
+    ApiCallV2(config.apiEnv,clustersEndpoint)
+      .execute()
+      .asDF()
+      .withColumn("organization_id", lit(config.organizationId))
+  }
+
+  /**
    * Create a backup of the Overwatch datasets
    * @param targetPrefix prefix of path target to send the snap
    * @param cloneLevel Deep or Shallow
