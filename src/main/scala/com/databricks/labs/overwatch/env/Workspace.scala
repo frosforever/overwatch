@@ -159,12 +159,12 @@ class Workspace(config: Config) extends SparkSessionWrapper {
   }
 
   /**
-   *
+   * get all the sql warehouses in the workspace. It includes warehouse-id, warehouse-name and cluster-size
    * @return
    */
   def getEndpointsDF: DataFrame = {
-    val clustersEndpoint = "sql/warehouses"
-    ApiCallV2(config.apiEnv,clustersEndpoint)
+    val warehouseEndpoint = "sql/warehouses"
+    ApiCallV2(config.apiEnv,warehouseEndpoint)
       .execute()
       .asDF()
       .withColumn("organization_id", lit(config.organizationId))

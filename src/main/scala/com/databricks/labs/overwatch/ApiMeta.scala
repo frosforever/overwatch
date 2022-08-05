@@ -182,4 +182,5 @@ class ClusterEventsApi extends ApiMeta {
 class SqlEndpointsApi extends ApiMeta {
   setDataframeColumn("warehouses")
   setApiCallType("GET")
+  setStoreInTempLocation(true)
 }

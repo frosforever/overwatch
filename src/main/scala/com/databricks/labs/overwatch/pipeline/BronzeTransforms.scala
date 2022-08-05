@@ -927,8 +927,167 @@ trait BronzeTransforms extends SparkSessionWrapper {
 
   }
 
-  protected def generateEndpointSpecsDF()(df: DataFrame): DataFrame = {
-    df
+  protected def generateEndpointSpecsDF(
+                                         filteredAuditLogDF: DataFrame,
+                                         startTime: TimeTypes,
+                                         endTime: TimeTypes,
+                                         pipelineSnapTS: TimeTypes,
+                                         apiEnv: ApiEnv,
+                                         organizationId: String,
+                                         database: Database,
+                                         erroredBronzeEventsTarget: PipelineTable,
+                                         tempWorkingDir: String
+                                       )(df: DataFrame): DataFrame = {
+
+    val warehouseIDs = df.as[String].collect()
+
+    if (warehouseIDs.isEmpty) throw new NoNewDataException(s"No endpoints could be found . Please " +
+      s"validate your audit log input and endpoints_snapshot_bronze tables to ensure data is flowing to them " +
+      s"properly. Skipping!", Level.ERROR)
+
+    val processingStartTime = System.currentTimeMillis();
+    logger.log(Level.INFO, "Calling APIv2, Number of warehouse id:" + warehouseIDs.length + " run id :" + apiEnv.runID)
+    val tmpEndpointsSpecsSuccessPath = s"$tempWorkingDir/endpointsSpecBronze/success" + apiEnv.runID
+    val tmpEndpointsSpecsErrorPath = s"$tempWorkingDir/endpointsSpecBronze/error" + apiEnv.runID
+
+    getEndpointsSpecs(warehouseIDs, startTime, endTime, apiEnv, tmpEndpointsSpecsSuccessPath, tmpEndpointsSpecsErrorPath)
+    if (Helpers.pathExists(tmpEndpointsSpecsErrorPath)) {
+      persistErrors(
+        spark.read.json(tmpEndpointsSpecsErrorPath)
+          .withColumn("from_ts", toTS(col("from_epoch")))
+          .withColumn("until_ts", toTS(col("until_epoch"))),
+        database,
+        erroredBronzeEventsTarget,
+        pipelineSnapTS,
+        organizationId
+      )
+      logger.log(Level.INFO, "Persist error completed")
+    }
+
+    //Need to check the below code and an alternative for processClusterEvents
+    val clusterEventDf = processEndpointSpecs(tmpEndpointsSpecsSuccessPath, organizationId, erroredBronzeEventsTarget)
+    val processingEndTime = System.currentTimeMillis();
+    logger.log(Level.INFO, " Duration in millis :" + (processingEndTime - processingStartTime))
+    clusterEventDf
+  }
+
+  private def getEndpointsSpecs(warehouseIDs: Array[String],
+                                startTime: TimeTypes,
+                                endTime: TimeTypes,
+                                apiEnv: ApiEnv,
+                                tmpEndpointsSpecsSuccessPath: String,
+                                tmpEndpointsSpecsErrorPath: String) = {
+    val finalResponseCount = warehouseIDs.length
+    var responseCounter = 0
+    var apiResponseArray = Collections.synchronizedList(new util.ArrayList[String]())
+    var apiErrorArray = Collections.synchronizedList(new util.ArrayList[String]())
+    implicit val ec: ExecutionContextExecutor = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(apiEnv.threadPoolSize))
+    //TODO identify the best practice to implement the future.
+    for (i <- warehouseIDs.indices) {
+      val id = warehouseIDs(i)
+      val future = Future {
+        val apiObj = ApiCallV2(apiEnv, "sql/warehouses"+"/"+id, tmpEndpointsSpecsSuccessPath).executeMultiThread()
+        synchronized {
+          apiResponseArray.addAll(apiObj)
+          if (apiResponseArray.size() >= apiEnv.successBatchSize) {
+            PipelineFunctions.writeMicroBatchToTempLocation(tmpEndpointsSpecsSuccessPath, apiResponseArray.toString)
+            apiResponseArray = Collections.synchronizedList(new util.ArrayList[String]())
+          }
+        }
+
+      }
+      future.onComplete {
+        case Success(_) =>
+          responseCounter = responseCounter + 1
+
+        case Failure(e) =>
+          if (e.isInstanceOf[ApiCallFailureV2]) {
+            synchronized {
+              apiErrorArray.add(e.getMessage)
+              if (apiErrorArray.size() >= apiEnv.errorBatchSize) {
+                PipelineFunctions.writeMicroBatchToTempLocation(tmpEndpointsSpecsErrorPath, apiErrorArray.toString)
+                apiErrorArray = Collections.synchronizedList(new util.ArrayList[String]())
+              }
+            }
+            logger.log(Level.ERROR, "Future failure message: " + e.getMessage, e)
+          }
+          responseCounter = responseCounter + 1
+      }
+    }
+    val timeoutThreshold = 300000 // 5 minutes
+    var currentSleepTime = 0
+    var responseStateWhileSleeping = responseCounter
+    while (responseCounter < finalResponseCount && currentSleepTime < timeoutThreshold) {
+      //As we are using Futures and running 4 threads in parallel, We are checking if all the treads has completed the execution or not.
+      // If we have not received the response from all the threads then we are waiting for 5 seconds and again revalidating the count.
+      if (currentSleepTime > 120000) //printing the waiting message only if the waiting time is more than 2 minutes.
+      {
+        println(s"""Waiting for other queued API Calls to complete; cumulative wait time ${currentSleepTime / 1000} seconds; Api response yet to receive ${finalResponseCount - responseCounter}""")
+      }
+      Thread.sleep(5000)
+      currentSleepTime += 5000
+      if (responseStateWhileSleeping < responseCounter) { //new API response received while waiting.
+        currentSleepTime = 0 //resetting the sleep time.
+        responseStateWhileSleeping = responseCounter
+      }
+    }
+    if (responseCounter != finalResponseCount) { // Checking whether all the api responses has been received or not.
+      logger.log(Level.ERROR, s"""Unable to receive all the clusters/events api responses; Api response received ${responseCounter};Api response not received ${finalResponseCount - responseCounter}""")
+      throw new Exception(s"""Unable to receive all the clusters/events api responses; Api response received ${responseCounter};Api response not received ${finalResponseCount - responseCounter}""")
+    }
+    if (apiResponseArray.size() > 0) { //In case of response array didn't hit the batch-size as a final step we will write it to the persistent storage.
+      PipelineFunctions.writeMicroBatchToTempLocation(tmpEndpointsSpecsErrorPath, apiResponseArray.toString)
+      apiResponseArray = Collections.synchronizedList(new util.ArrayList[String]())
+    }
+    if (apiErrorArray.size() > 0) { //In case of error array didn't hit the batch-size as a final step we will write it to the persistent storage.
+      PipelineFunctions.writeMicroBatchToTempLocation(tmpEndpointsSpecsErrorPath, apiErrorArray.toString)
+      apiErrorArray = Collections.synchronizedList(new util.ArrayList[String]())
+    }
+    logger.log(Level.INFO, " Cluster event landing completed")
+  }
+
+  private def processEndpointSpecs(tmpClusterEventsSuccessPath: String, organizationId: String, erroredBronzeEventsTarget: PipelineTable): DataFrame = {
+    logger.log(Level.INFO, "COMPLETE: Cluster Events acquisition, building data")
+    if (Helpers.pathExists(tmpClusterEventsSuccessPath)) {
+      if (spark.read.json(tmpClusterEventsSuccessPath).columns.contains("events")) {
+        try {
+          val tdf = SchemaScrubber.scrubSchema(
+            spark.read.json(tmpClusterEventsSuccessPath)
+              .select(explode('events).alias("events"))
+              .select(col("events.*"))
+          )
+          val changeInventory = Map[String, Column](
+            "details.attributes.custom_tags" -> SchemaTools.structToMap(tdf, "details.attributes.custom_tags"),
+            "details.attributes.spark_conf" -> SchemaTools.structToMap(tdf, "details.attributes.spark_conf"),
+            "details.attributes.spark_env_vars" -> SchemaTools.structToMap(tdf, "details.attributes.spark_env_vars"),
+            "details.previous_attributes.custom_tags" -> SchemaTools.structToMap(tdf, "details.previous_attributes.custom_tags"),
+            "details.previous_attributes.spark_conf" -> SchemaTools.structToMap(tdf, "details.previous_attributes.spark_conf"),
+            "details.previous_attributes.spark_env_vars" -> SchemaTools.structToMap(tdf, "details.previous_attributes.spark_env_vars")
+          )
+
+          val clusterEventsDF = SchemaScrubber.scrubSchema(tdf.select(SchemaTools.modifyStruct(tdf.schema, changeInventory): _*))
+            .withColumn("organization_id", lit(organizationId))
+
+          val clusterEventsCaptured = clusterEventsDF.count
+          val logEventsMSG = s"CLUSTER EVENTS CAPTURED: ${clusterEventsCaptured}"
+          logger.log(Level.INFO, logEventsMSG)
+          clusterEventsDF
+
+        } catch {
+          case e: Throwable =>
+            throw new Exception(e)
+        }
+      }
+      else {
+        logger.info("Events column not found in dataset")
+        throw new NoNewDataException(s"EMPTY: No New Cluster Events.Events column not found in dataset, Progressing module but it's recommended you " +
+          s"validate there no api call errors in ${erroredBronzeEventsTarget.tableFullName}", Level.WARN, allowModuleProgression = true)
+      }
+    } else {
+      logger.info("EMPTY MODULE: Cluster Events")
+      throw new NoNewDataException(s"EMPTY: No New Cluster Events. Progressing module but it's recommended you " +
+        s"validate there no api call errors in ${erroredBronzeEventsTarget.tableFullName}", Level.WARN, allowModuleProgression = true)
+    }
   }
 
 }
